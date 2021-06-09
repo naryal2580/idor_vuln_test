@@ -4,9 +4,10 @@
 from fastapi import FastAPI, HTTPException
 from faker import Faker
 from random import randint
-import sqlite3
+import aiosqlite
 import os
 import uvicorn
+from signal import SIGKILL
 
 
 fake = Faker()
@@ -15,22 +16,22 @@ max_id = randint(randint(1111, 9999), randint(11111, 99999))
 db_name = './database.db'
 
 
-def add_entry(db, _id, name, address, email):
-    db.execute('INSERT INTO users VALUES (?, ?, ?, ?)', (
+async def add_entry(db, _id, name, address, email):
+    await db.execute('INSERT INTO users VALUES (?, ?, ?, ?)', (
         int(_id),
         str(name),
         str(address),
         str(email)
         )
     )
-    db.commit()
+    await db.commit()
 
 
 @api.on_event("startup")
-def startup_event():
+async def startup_event():
     if not os.path.isfile(db_name):
-        db = sqlite3.connect(db_name)
-        db.execute('''
+        db = await aiosqlite.connect(db_name)
+        await db.execute('''
 CREATE TABLE users (
 id PRIMARY_KEY,
 name TEXT,
@@ -38,8 +39,8 @@ address TEXT,
 email TEXT
 )
         '''[1:-1].strip())
-        db.commit()
-        add_entry(0, 'Anonymous', 'Your network', 'some_fake_email_placeholder@protonmail.com')
+        await db.commit()
+        await add_entry(db, 0, 'Anonymous', 'Your network', 'some_fake_email_placeholder@protonmail.com')
 
 
 @api.get('/')
@@ -48,7 +49,7 @@ def root():
 
 
 @api.get('/user_info')
-def user_info(id: int):
+async def user_info(id: int):
 
     if id > max_id:
         raise HTTPException(
@@ -56,19 +57,25 @@ def user_info(id: int):
                             detail='Entry not found.'
                         )
 
-    db = sqlite3.connect(db_name)
-    ids = tuple(db.execute('SELECT id FROM users'))
+    db = await aiosqlite.connect(db_name)
+    ids_cur = await db.execute('SELECT id FROM users')
+    ids = tuple(await ids_cur.fetchall())
+    await ids_cur.close()
+
     if ids.count((id,)):
-        entry = tuple(db.execute('SELECT * FROM users WHERE id=:_id', {'_id': id}))[0]
+        entry_cur = await db.execute('SELECT * FROM users WHERE id=:_id', {'_id': id})
+        entry = await entry_cur.fetchone()
+        await entry_cur.close()
         resp = {
                 'id': entry[0],
                 'name': entry[1],
                 'address': entry[2],
                 'email': entry[3]
             }
+
     else:
         name, addr, email = fake.name(), fake.address(), fake.email()
-        add_entry(db, id, name, addr, email)
+        await add_entry(db, id, name, addr, email)
         resp = {
                 'id': id,
                 'name': name,
@@ -98,5 +105,10 @@ def reset_to_custom_id(id: int):
     return {'status': True}
 
 
+@api.on_event('shutdown')
+def suicide():
+    os.kill(os.getpid(), SIGKILL)
+
+
 if __name__ == '__main__':
-    uvicorn.run("main:api", port=3117, reload=True)
+    uvicorn.run("main:api", port=3117)
